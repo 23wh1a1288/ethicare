@@ -1,0 +1,7 @@
+project_id = "doyagnpdejhbdymjdffo"
+
+[functions.classify-image]
+verify_jwt = false
+
+[functions.send-notification]
+verify_jwt = false
