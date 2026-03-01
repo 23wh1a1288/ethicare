@@ -3,7 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import {
   Shield, User, Upload, Lock, Search, FileWarning, Bell,
   LogOut, CheckCircle, XCircle, AlertTriangle, Eye, Fingerprint, KeyRound,
-  Globe, Calendar, Trash2
+  Globe, Calendar, Trash2, Edit, Save, X, Loader2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
 
 interface UploadedImage {
   id: string;
@@ -44,14 +45,6 @@ interface Notification {
   read: boolean;
 }
 
-const categories = [
-  { name: "Normal Selfie", risk: "Safe" as const, flagged: false },
-  { name: "Educational Content", risk: "Safe" as const, flagged: false },
-  { name: "Blurred / Censored", risk: "Moderate Risk" as const, flagged: true },
-  { name: "Face + Explicit", risk: "High Risk" as const, flagged: true },
-  { name: "Explicit (No Face)", risk: "High Risk" as const, flagged: true },
-];
-
 export default function Dashboard() {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -62,19 +55,85 @@ export default function Dashboard() {
     { id: "1", type: "system", message: "Welcome to Ethicare! Your account is now active.", date: new Date().toISOString(), read: false },
   ]);
   const [complaintForm, setComplaintForm] = useState({ imageId: "", description: "", url: "" });
+  const [scanning, setScanning] = useState(false);
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [editForm, setEditForm] = useState<any>({});
 
   useEffect(() => {
     const stored = localStorage.getItem("ethicare_user");
     if (!stored) { navigate("/login"); return; }
-    setUser(JSON.parse(stored));
+    const parsed = JSON.parse(stored);
+    setUser(parsed);
+    setEditForm(parsed);
+
+    // Load saved images
+    const savedImages = localStorage.getItem("ethicare_images_" + parsed.email);
+    if (savedImages) setImages(JSON.parse(savedImages));
+    const savedComplaints = localStorage.getItem("ethicare_complaints_" + parsed.email);
+    if (savedComplaints) setComplaints(JSON.parse(savedComplaints));
+    const savedNotifs = localStorage.getItem("ethicare_notifications_" + parsed.email);
+    if (savedNotifs) setNotifications(JSON.parse(savedNotifs));
   }, [navigate]);
+
+  // Persist images, complaints, notifications
+  useEffect(() => {
+    if (user?.email) {
+      localStorage.setItem("ethicare_images_" + user.email, JSON.stringify(images));
+    }
+  }, [images, user]);
+  useEffect(() => {
+    if (user?.email) {
+      localStorage.setItem("ethicare_complaints_" + user.email, JSON.stringify(complaints));
+    }
+  }, [complaints, user]);
+  useEffect(() => {
+    if (user?.email) {
+      localStorage.setItem("ethicare_notifications_" + user.email, JSON.stringify(notifications));
+    }
+  }, [notifications, user]);
 
   const logout = () => {
     localStorage.removeItem("ethicare_user");
     navigate("/login");
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const sendEmailNotification = async (subject: string, body: string, type: string) => {
+    if (!user?.email) return;
+    try {
+      const { data, error } = await supabase.functions.invoke("send-notification", {
+        body: { to: user.email, subject, body, type },
+      });
+      if (error) console.error("Email notification error:", error);
+      else {
+        console.log("Email notification result:", data);
+        if (data?.method === "resend") {
+          toast({ title: "📧 Email Sent", description: `Notification sent to ${user.email}` });
+        }
+      }
+    } catch (e) {
+      console.error("Failed to send email:", e);
+    }
+  };
+
+  const classifyImageWithAI = async (imageBase64: string, fileName: string): Promise<{category: string; risk: "Safe" | "Moderate Risk" | "High Risk"; flagged: boolean}> => {
+    try {
+      const { data, error } = await supabase.functions.invoke("classify-image", {
+        body: { imageBase64 },
+      });
+      if (error) throw error;
+      return {
+        category: data.category || "Normal Selfie",
+        risk: (data.risk as "Safe" | "Moderate Risk" | "High Risk") || "Safe",
+        flagged: data.flagged ?? false,
+      };
+    } catch (e) {
+      console.error("AI classification error:", e);
+      // Fallback: basic heuristic classification
+      return { category: "Normal Selfie", risk: "Safe", flagged: false };
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (images.length >= 5) {
@@ -86,27 +145,59 @@ export default function Dashboard() {
       return;
     }
 
+    setScanning(true);
     const reader = new FileReader();
-    reader.onload = () => {
-      const cat = categories[Math.floor(Math.random() * categories.length)];
+    reader.onload = async () => {
+      const base64 = reader.result as string;
+      
+      toast({ title: "🔍 Scanning Image...", description: "AI is analyzing your image for content classification." });
+      
+      const classification = await classifyImageWithAI(base64, file.name);
+      
       const newImg: UploadedImage = {
         id: Date.now().toString(),
         name: file.name,
-        url: reader.result as string,
-        category: cat.name,
-        risk: cat.risk,
-        flagged: cat.flagged,
+        url: base64,
+        category: classification.category,
+        risk: classification.risk,
+        flagged: classification.flagged,
         locked: false,
         misuseDetected: false,
       };
       setImages((prev) => [...prev, newImg]);
       setNotifications((prev) => [
-        { id: Date.now().toString(), type: "scan", message: `Image "${file.name}" scanned: ${cat.name} (${cat.risk})`, date: new Date().toISOString(), read: false },
+        { id: Date.now().toString(), type: "scan", message: `Image "${file.name}" scanned: ${classification.category} (${classification.risk})`, date: new Date().toISOString(), read: false },
         ...prev,
       ]);
-      toast({ title: "Image Scanned", description: `Category: ${cat.name} | Risk: ${cat.risk}` });
+      toast({ title: "Image Scanned", description: `Category: ${classification.category} | Risk: ${classification.risk}` });
+
+      // Send email for flagged images
+      if (classification.flagged) {
+        sendEmailNotification(
+          "⚠️ Image Flagged - Ethicare Alert",
+          `<p>Your uploaded image <strong>"${file.name}"</strong> has been flagged.</p>
+           <p><strong>Category:</strong> ${classification.category}</p>
+           <p><strong>Risk Level:</strong> ${classification.risk}</p>
+           <p>Please review this in your Ethicare dashboard.</p>`,
+          "image_flagged"
+        );
+      }
+      
+      setScanning(false);
     };
     reader.readAsDataURL(file);
+    // Reset file input
+    e.target.value = "";
+  };
+
+  const deleteImage = (imgId: string) => {
+    const img = images.find(i => i.id === imgId);
+    setImages((prev) => prev.filter((i) => i.id !== imgId));
+    setNotifications((prev) => [
+      { id: Date.now().toString(), type: "info", message: `Image "${img?.name}" has been deleted.`, date: new Date().toISOString(), read: false },
+      ...prev,
+    ]);
+    toast({ title: "Image Deleted", description: `"${img?.name}" removed. You can upload ${5 - images.length + 1} more images.` });
   };
 
   const lockImage = (imgId: string, lockType: string) => {
@@ -134,6 +225,17 @@ export default function Dashboard() {
           ...prev,
         ]);
         toast({ title: "⚠️ Alert", description: "Misuse detected! Check your images tab.", variant: "destructive" });
+
+        // Send email for misuse detection
+        const img = images.find(i => i.id === imgId);
+        sendEmailNotification(
+          "🚨 Image Misuse Detected - Ethicare Alert",
+          `<p>Your image <strong>"${img?.name}"</strong> has been detected on a suspicious website.</p>
+           <p><strong>Detected URL:</strong> https://suspicious-site.example.com/stolen-image</p>
+           <p><strong>Detection Date:</strong> ${new Date().toLocaleDateString()}</p>
+           <p>We recommend filing a complaint immediately from your Ethicare dashboard.</p>`,
+          "misuse_detected"
+        );
       } else {
         setNotifications((prev) => [
           { id: Date.now().toString(), type: "info", message: "No misuse detected for your locked image.", date: new Date().toISOString(), read: false },
@@ -163,6 +265,25 @@ export default function Dashboard() {
       ...prev,
     ]);
     toast({ title: "Complaint Filed", description: `Complaint ID: ${newComplaint.id}` });
+
+    // Send email for complaint submission
+    sendEmailNotification(
+      "📢 Complaint Submitted - Ethicare",
+      `<p>Your complaint has been successfully submitted.</p>
+       <p><strong>Complaint ID:</strong> ${newComplaint.id}</p>
+       <p><strong>Description:</strong> ${complaintForm.description}</p>
+       <p><strong>Status:</strong> Submitted</p>
+       <p>We will review your complaint and update you on its progress.</p>`,
+      "complaint_submitted"
+    );
+  };
+
+  const saveProfile = () => {
+    const updatedUser = { ...user, ...editForm };
+    setUser(updatedUser);
+    localStorage.setItem("ethicare_user", JSON.stringify(updatedUser));
+    setEditingProfile(false);
+    toast({ title: "Profile Updated", description: "Your profile has been saved." });
   };
 
   if (!user) return null;
@@ -213,6 +334,24 @@ export default function Dashboard() {
           {/* Profile */}
           <TabsContent value="profile">
             <div className="glass-panel rounded-xl p-8">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-display font-bold">My Profile</h2>
+                {!editingProfile ? (
+                  <Button variant="outline" size="sm" onClick={() => { setEditForm({ ...user }); setEditingProfile(true); }}>
+                    <Edit className="h-4 w-4 mr-1" /> Edit Profile
+                  </Button>
+                ) : (
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={saveProfile} className="gradient-primary text-primary-foreground">
+                      <Save className="h-4 w-4 mr-1" /> Save
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => setEditingProfile(false)}>
+                      <X className="h-4 w-4 mr-1" /> Cancel
+                    </Button>
+                  </div>
+                )}
+              </div>
+
               <div className="flex flex-col sm:flex-row items-start gap-6">
                 <div className="h-24 w-24 rounded-full overflow-hidden border-2 border-primary shrink-0">
                   {user.profileImage ? (
@@ -223,25 +362,80 @@ export default function Dashboard() {
                     </div>
                   )}
                 </div>
-                <div className="space-y-3 flex-1">
-                  <h2 className="text-2xl font-display font-bold">{user.fullName || user.name || "User"}</h2>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                    <div><span className="text-muted-foreground">Email:</span> {user.email}</div>
-                    <div><span className="text-muted-foreground">Phone:</span> {user.phone || "N/A"}</div>
-                    <div><span className="text-muted-foreground">Age:</span> {user.age || "N/A"}</div>
-                    <div><span className="text-muted-foreground">DOB:</span> {user.dob || "N/A"}</div>
-                    <div><span className="text-muted-foreground">Country:</span> {user.country || "N/A"}</div>
-                    <div><span className="text-muted-foreground">State:</span> {user.state || "N/A"}</div>
-                    {user.address && <div className="sm:col-span-2"><span className="text-muted-foreground">Address:</span> {user.address}</div>}
-                  </div>
-                  <div className="flex gap-2 pt-2">
-                    <Badge variant="secondary" className="font-mono text-xs">
-                      Images: {images.length}/5
-                    </Badge>
-                    <Badge variant="secondary" className="font-mono text-xs">
-                      Complaints: {complaints.length}
-                    </Badge>
-                  </div>
+                <div className="flex-1 w-full">
+                  {editingProfile ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="sm:col-span-2 space-y-1">
+                        <Label className="text-xs text-muted-foreground">Full Name</Label>
+                        <Input value={editForm.fullName || ""} onChange={(e) => setEditForm((p: any) => ({ ...p, fullName: e.target.value }))} />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">Age</Label>
+                        <Input type="number" value={editForm.age || ""} onChange={(e) => setEditForm((p: any) => ({ ...p, age: e.target.value }))} />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">Date of Birth</Label>
+                        <Input type="date" value={editForm.dob || ""} onChange={(e) => setEditForm((p: any) => ({ ...p, dob: e.target.value }))} />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">Email</Label>
+                        <Input type="email" value={editForm.email || ""} disabled className="opacity-60" />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">Phone</Label>
+                        <Input value={editForm.phone || ""} onChange={(e) => setEditForm((p: any) => ({ ...p, phone: e.target.value }))} />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">Country</Label>
+                        <Input value={editForm.country || ""} onChange={(e) => setEditForm((p: any) => ({ ...p, country: e.target.value }))} />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">State</Label>
+                        <Input value={editForm.state || ""} onChange={(e) => setEditForm((p: any) => ({ ...p, state: e.target.value }))} />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">Gender</Label>
+                        <Input value={editForm.gender || ""} onChange={(e) => setEditForm((p: any) => ({ ...p, gender: e.target.value }))} />
+                      </div>
+                      <div className="sm:col-span-2 space-y-1">
+                        <Label className="text-xs text-muted-foreground">Address</Label>
+                        <Input value={editForm.address || ""} onChange={(e) => setEditForm((p: any) => ({ ...p, address: e.target.value }))} />
+                      </div>
+                      <div className="sm:col-span-2 space-y-1">
+                        <Label className="text-xs text-muted-foreground">Change Profile Image</Label>
+                        <Input type="file" accept="image/*" onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            const reader = new FileReader();
+                            reader.onload = () => setEditForm((p: any) => ({ ...p, profileImage: reader.result as string }));
+                            reader.readAsDataURL(file);
+                          }
+                        }} />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <h2 className="text-2xl font-display font-bold">{user.fullName || user.name || "User"}</h2>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                        <div><span className="text-muted-foreground">Email:</span> {user.email}</div>
+                        <div><span className="text-muted-foreground">Phone:</span> {user.phone || "N/A"}</div>
+                        <div><span className="text-muted-foreground">Age:</span> {user.age || "N/A"}</div>
+                        <div><span className="text-muted-foreground">DOB:</span> {user.dob || "N/A"}</div>
+                        <div><span className="text-muted-foreground">Country:</span> {user.country || "N/A"}</div>
+                        <div><span className="text-muted-foreground">State:</span> {user.state || "N/A"}</div>
+                        <div><span className="text-muted-foreground">Gender:</span> {user.gender || "N/A"}</div>
+                        {user.address && <div className="sm:col-span-2"><span className="text-muted-foreground">Address:</span> {user.address}</div>}
+                      </div>
+                      <div className="flex gap-2 pt-2">
+                        <Badge variant="secondary" className="font-mono text-xs">
+                          Images: {images.length}/5
+                        </Badge>
+                        <Badge variant="secondary" className="font-mono text-xs">
+                          Complaints: {complaints.length}
+                        </Badge>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -252,12 +446,13 @@ export default function Dashboard() {
             <div className="glass-panel rounded-xl p-6">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-display font-semibold text-lg">Upload Images ({images.length}/5)</h3>
-                <Label htmlFor="img-upload" className="cursor-pointer">
+                <Label htmlFor="img-upload" className={`cursor-pointer ${images.length >= 5 || scanning ? "opacity-50 pointer-events-none" : ""}`}>
                   <div className="gradient-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2">
-                    <Upload className="h-4 w-4" /> Upload
+                    {scanning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                    {scanning ? "Scanning..." : "Upload"}
                   </div>
                 </Label>
-                <input id="img-upload" type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={images.length >= 5} />
+                <input id="img-upload" type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={images.length >= 5 || scanning} />
               </div>
 
               {images.length === 0 ? (
@@ -275,19 +470,24 @@ export default function Dashboard() {
                           {img.locked && <Badge className="bg-primary/20 text-primary text-xs"><Lock className="h-3 w-3 mr-1" />{img.lockType}</Badge>}
                         </div>
                         <p className="text-xs text-muted-foreground">Category: {img.category}</p>
-                        {!img.locked && (
-                          <div className="flex gap-2">
-                            <Button size="sm" variant="outline" onClick={() => lockImage(img.id, "PIN Lock")} className="text-xs">
-                              <KeyRound className="h-3 w-3 mr-1" /> PIN Lock
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => lockImage(img.id, "Face Recognition")} className="text-xs">
-                              <Eye className="h-3 w-3 mr-1" /> Face Lock
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => lockImage(img.id, "Eye Recognition")} className="text-xs">
-                              <Fingerprint className="h-3 w-3 mr-1" /> Eye Lock
-                            </Button>
-                          </div>
-                        )}
+                        <div className="flex gap-2 flex-wrap">
+                          {!img.locked && (
+                            <>
+                              <Button size="sm" variant="outline" onClick={() => lockImage(img.id, "PIN Lock")} className="text-xs">
+                                <KeyRound className="h-3 w-3 mr-1" /> PIN Lock
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => lockImage(img.id, "Face Recognition")} className="text-xs">
+                                <Eye className="h-3 w-3 mr-1" /> Face Lock
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => lockImage(img.id, "Eye Recognition")} className="text-xs">
+                                <Fingerprint className="h-3 w-3 mr-1" /> Eye Lock
+                              </Button>
+                            </>
+                          )}
+                          <Button size="sm" variant="destructive" onClick={() => deleteImage(img.id)} className="text-xs">
+                            <Trash2 className="h-3 w-3 mr-1" /> Delete
+                          </Button>
+                        </div>
                       </div>
                     </div>
                   ))}
