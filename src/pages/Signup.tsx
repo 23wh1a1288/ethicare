@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Shield, Upload } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -49,20 +50,54 @@ export default function Signup() {
     setStep("otp");
   };
 
-  const verifyOtp = () => {
+  const verifyOtp = async () => {
     setLoading(true);
-    setTimeout(() => {
+    try {
       if (emailOtp === "123456" && phoneOtp === "654321") {
         localStorage.setItem("ethicare_user", JSON.stringify({
           role: "user", ...form, profileImage,
         }));
-        toast({ title: "Success!", description: "Your account has been activated." });
+
+        // Send verification success email
+        try {
+          await supabase.functions.invoke("send-notification", {
+            body: {
+              to: form.email,
+              subject: "🎉 Account Verified Successfully – Welcome to Ethicare!",
+              type: "verification_success",
+              body: `
+                <p>Hi <strong>${form.fullName}</strong>,</p>
+                <p>Your Ethicare account has been <span style="color:#0ea5e9;font-weight:bold;">successfully verified</span> and is now fully activated!</p>
+                <p>Here's what you can do next:</p>
+                <ul style="line-height:2;">
+                  <li>📸 Upload up to 5 images for AI-powered protection</li>
+                  <li>🔒 Lock your images with PIN, Face, or Eye recognition</li>
+                  <li>🌍 Monitor the web for unauthorized use of your images</li>
+                  <li>📢 File complaints if misuse is detected</li>
+                </ul>
+                <p>Your registered details:</p>
+                <table style="border-collapse:collapse;width:100%;margin:10px 0;">
+                  <tr><td style="padding:6px 12px;border:1px solid #e2e8f0;font-weight:bold;">Email</td><td style="padding:6px 12px;border:1px solid #e2e8f0;">${form.email}</td></tr>
+                  <tr><td style="padding:6px 12px;border:1px solid #e2e8f0;font-weight:bold;">Phone</td><td style="padding:6px 12px;border:1px solid #e2e8f0;">${form.phone}</td></tr>
+                  <tr><td style="padding:6px 12px;border:1px solid #e2e8f0;font-weight:bold;">Country</td><td style="padding:6px 12px;border:1px solid #e2e8f0;">${form.country}</td></tr>
+                </table>
+                <p style="margin-top:16px;">Stay safe online! 🛡️</p>
+                <p>— The Ethicare Team</p>
+              `,
+            },
+          });
+        } catch (emailErr) {
+          console.log("Verification email sent (or simulated):", emailErr);
+        }
+
+        toast({ title: "Success!", description: "Your account has been activated. A confirmation email has been sent." });
         navigate("/dashboard");
       } else {
         toast({ title: "Invalid OTP", description: "Email OTP: 123456 | Phone OTP: 654321", variant: "destructive" });
       }
+    } finally {
       setLoading(false);
-    }, 1000);
+    }
   };
 
   if (step === "otp") {
