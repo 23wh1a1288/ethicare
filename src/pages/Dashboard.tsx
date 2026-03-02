@@ -78,17 +78,26 @@ export default function Dashboard() {
   // Persist images, complaints, notifications
   useEffect(() => {
     if (user?.email) {
-      localStorage.setItem("ethicare_images_" + user.email, JSON.stringify(images));
+      try {
+        localStorage.setItem("ethicare_images_" + user.email, JSON.stringify(images));
+      } catch (e) {
+        console.warn("Storage quota exceeded for images. Consider clearing old data.");
+        toast({ title: "Storage Full", description: "Too many images stored locally. Please remove some images to free space.", variant: "destructive" });
+      }
     }
   }, [images, user]);
   useEffect(() => {
     if (user?.email) {
-      localStorage.setItem("ethicare_complaints_" + user.email, JSON.stringify(complaints));
+      try {
+        localStorage.setItem("ethicare_complaints_" + user.email, JSON.stringify(complaints));
+      } catch { /* ignore */ }
     }
   }, [complaints, user]);
   useEffect(() => {
     if (user?.email) {
-      localStorage.setItem("ethicare_notifications_" + user.email, JSON.stringify(notifications));
+      try {
+        localStorage.setItem("ethicare_notifications_" + user.email, JSON.stringify(notifications));
+      } catch { /* ignore */ }
     }
   }, [notifications, user]);
 
